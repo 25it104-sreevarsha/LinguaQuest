@@ -97,27 +97,28 @@ async function chat(system, history) {
   }
 }
 
-// Parse JSON from AI response (strips markdown fences and extracts JSON)
+// Parse JSON from AI response - with auto-correction of common errors
 function parseJSON(text) {
   if (!text || typeof text !== "string") throw new Error("Invalid input for JSON parsing");
   
-  // Remove markdown code fences
-  let clean = text.replace(/```json\s*\n?|```\s*\n?/g, "").trim();
+  let clean = text.trim();
   
-  // Remove any "Here's the JSON:" type prefixes and trailing text
-  clean = clean.replace(/^[^[\{]*/, "").trim();
+  // Remove markdown code fences and common prefixes
+  clean = clean.replace(/```json\s*\n?|```\s*\n?/g, "").trim();
+  clean = clean.replace(/^[^[\{]*/, "").trim(); // Remove any prefix before [ or {
   
-  // Strategy 1: Try direct parse first (cleanest case)
+  // Strategy 1: Try direct parse (works if AI returns perfect JSON)
   try {
     return JSON.parse(clean);
-  } catch (e) {
-    // Continue to extraction strategies
+  } catch (e1) {
+    // Continue with fixes
   }
   
-  // Strategy 2: Find first valid JSON structure by counting braces/brackets properly
+  // Strategy 2: Extract and clean JSON structure
   let startPos = -1;
   let isArray = false;
   
+  // Find first [ or {
   for (let i = 0; i < clean.length; i++) {
     if (clean[i] === '[') {
       startPos = i;
@@ -130,9 +131,9 @@ function parseJSON(text) {
     }
   }
   
-  if (startPos === -1) throw new Error("No JSON structure found in response");
+  if (startPos === -1) throw new Error("No JSON structure found");
   
-  // Count matching brackets
+  // Extract JSON by counting brackets
   let bracketCount = 0;
   let inString = false;
   let escapeNext = false;
@@ -151,7 +152,7 @@ function parseJSON(text) {
       continue;
     }
     
-    if (char === '"') {
+    if (char === '"' && (i === 0 || clean[i-1] !== '\\')) {
       inString = !inString;
       continue;
     }
@@ -169,13 +170,55 @@ function parseJSON(text) {
     }
   }
   
-  if (endPos === -1) throw new Error("Mismatched JSON brackets in response");
+  if (endPos === -1) throw new Error("Mismatched JSON brackets");
   
-  const extracted = clean.substring(startPos, endPos);
+  let extracted = clean.substring(startPos, endPos);
+  
+  // Strategy 3: Fix common JSON errors
   try {
     return JSON.parse(extracted);
-  } catch (parseErr) {
-    throw new Error(`JSON parse failed at position ${parseErr.message}`);
+  } catch (e2) {
+    // Try auto-fixing common issues
+    
+    // Fix: trailing commas before ] or }
+    extracted = extracted.replace(/,\s*([}\]])/g, '$1');
+    
+    // Fix: single quotes to double quotes (in object keys and some string values)
+    extracted = extracted.replace(/'([^']*?)'/g, '"$1"');
+    
+    // Fix: unescaped quotes within strings (replace " with \" when not already escaped)
+    // This is tricky - only fix quotes that appear to be inside string values
+    extracted = extracted.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, (match) => {
+      let fixed = match.replace(/(?<!\\)"/g, '\\"');
+      return fixed;
+    });
+    
+    // Fix: missing commas between array/object elements
+    extracted = extracted.replace(/}\s*{/g, '},{');
+    extracted = extracted.replace(/]\s*{/g, '],[');
+    extracted = extracted.replace(/}\s*\[/g, '},{');
+    
+    try {
+      return JSON.parse(extracted);
+    } catch (e3) {
+      // Strategy 4: Last resort - try to salvage by removing problematic characters
+      let sanitized = extracted
+        .replace(/[\n\r\t]/g, ' ') // Remove whitespace chars
+        .replace(/\s+/g, ' ') // Normalize spaces
+        .replace(/,\s*([}\]])/g, '$1'); // Remove trailing commas again
+      
+      try {
+        return JSON.parse(sanitized);
+      } catch (e4) {
+        // If all else fails, log and throw with context
+        console.error("JSON parse failed after auto-fix attempts");
+        console.error("Original:", text.substring(0, 300));
+        console.error("Extracted:", extracted.substring(0, 300));
+        console.error("Final attempt:", sanitized.substring(0, 300));
+        console.error("Errors:", e1.message, e2.message, e3.message, e4.message);
+        throw new Error(`JSON parsing failed: ${e4.message}`);
+      }
+    }
   }
 }
 
