@@ -104,18 +104,31 @@ function parseJSON(text) {
   // Remove markdown code fences
   let clean = text.replace(/```json\s*\n?|```\s*\n?/g, "").trim();
   
-  // Try to find JSON array or object in the text
-  // Look for arrays first: [{ ... }]
-  const arrayMatch = clean.match(/\[\s*{[\s\S]*}\s*\]/m);
-  if (arrayMatch?.[0]) return JSON.parse(arrayMatch[0]);
+  // Strategy 1: Try direct parse first (cleanest case)
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    // Continue to extraction strategies
+  }
   
-  // Look for objects: { ... }
-  const objectMatch = clean.match(/\{[\s\S]*\}/m);
-  if (objectMatch?.[0]) return JSON.parse(objectMatch[0]);
+  // Strategy 2: Find and extract JSON array or object
+  // Look for patterns like: ...prefix...[{...}]...suffix... or ...prefix...{...}...suffix...
   
-  // Try parsing the whole thing as last resort
-  return JSON.parse(clean);
-}
+  // Find first '[' or '{'
+  const arrayStart = clean.indexOf('[');
+  const objStart = clean.indexOf('{');
+  
+  let startPos = -1;
+  if (arrayStart !== -1 && objStart !== -1) {
+    startPos = Math.min(arrayStart, objStart);
+  } else if (arrayStart !== -1) {
+    startPos = arrayStart;
+  } else if (objStart !== -1) {
+    startPos = objStart;
+  }
+  
+  if (startPos === -1) throw new Error("No JSON structure found in response");\n  \n  // Extract from start position, trying to find valid JSON
+  let bracketCount = 0;\n  let isArray = clean[startPos] === '[';\n  let inString = false;\n  let escapeNext = false;\n  let endPos = -1;\n  \n  for (let i = startPos; i < clean.length; i++) {\n    const char = clean[i];\n    \n    if (escapeNext) {\n      escapeNext = false;\n      continue;\n    }\n    \n    if (char === '\\\\') {\n      escapeNext = true;\n      continue;\n    }\n    \n    if (char === '\"') {\n      inString = !inString;\n      continue;\n    }\n    \n    if (!inString) {\n      if (char === (isArray ? '[' : '{')) bracketCount++;\n      if (char === (isArray ? ']' : '}')) {\n        bracketCount--;\n        if (bracketCount === 0) {\n          endPos = i + 1;\n          break;\n        }\n      }\n    }\n  }\n  \n  if (endPos === -1) throw new Error(\"Mismatched JSON brackets\");\n  \n  const extracted = clean.substring(startPos, endPos);\n  return JSON.parse(extracted);\n}
 
 // =============================================================================
 // DATA
@@ -557,27 +570,51 @@ function LessonOverlay({ world, native, target, onClose, onDone }) {
   const [err,   setErr]       = useState("");
 
   useEffect(() => {
-    const sys = `You are a language quiz generator. Generate EXACTLY 5 multiple-choice questions.
-IMPORTANT RULES:
-- The student's NATIVE language is: ${native.label}
-- The student is LEARNING: ${target.label}
-- The TOPIC is: ${world.topic}
-- Write EVERY question ("q") and EVERY explanation in ${native.label}
-- Write ALL 4 options in ${target.label}
-- "answer" is 0-based index of the correct option
+    const sys = `You are a language quiz generator. Generate EXACTLY 5 multiple-choice questions in strict JSON format.
 
-Return ONLY a raw JSON array, no markdown, no explanation:
-[{"q":"question text in ${native.label}","options":["option1 in ${target.label}","option2","option3","option4"],"answer":0,"explanation":"why this is correct, in ${native.label}"}]`;
+CRITICAL: Return ONLY valid JSON array, nothing else. No markdown, no code blocks, no explanations before or after.
 
-    ask(sys, `Generate 5 questions about: ${world.topic}. Native: ${native.label}. Learning: ${target.label}.`)
+Student details:
+- Native language: ${native.label}
+- Learning: ${target.label}
+- Topic: ${world.topic}
+
+Format requirements:
+1. Question and explanation MUST be in ${native.label}
+2. All 4 options MUST be in ${target.label}
+3. answer is 0-3 (index of correct option)
+4. Each option should be 1-5 words
+
+Return ONLY this JSON array format (no other text):
+[
+  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"},
+  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"}
+]`;
+
+    ask(sys, `Generate 5 questions for learning ${target.label}.`)
       .then(text => {
-        const data = parseJSON(text);
-        if (!Array.isArray(data) || data.length === 0) throw new Error("bad response");
-        setQs(data.slice(0, 5));
-        setPhase("quiz");
+        try {
+          const data = parseJSON(text);
+          if (!Array.isArray(data) || data.length === 0) {
+            throw new Error("Response is not a valid array");
+          }
+          // Validate each question has required fields
+          const valid = data.every(q => q.q && Array.isArray(q.options) && q.options.length === 4 && typeof q.answer === "number" && q.explanation);
+          if (!valid) {
+            throw new Error("Question format is invalid - missing required fields");
+          }
+          setQs(data.slice(0, 5));
+          setPhase("quiz");
+        } catch (parseErr) {
+          console.error("Parse error:", parseErr.message, "Raw text:", text.substring(0, 200));
+          throw parseErr;
+        }
       })
-      .catch(e => { setErr(e.message); setPhase("error"); });
-  }, []);
+      .catch(e => { 
+        setErr(e.message); 
+        setPhase("error"); 
+      });
+  }, [native.label, target.label, world.topic]);
 
   const q      = qs[idx];
   const isLast = idx === qs.length - 1;
@@ -684,30 +721,41 @@ function RPGOverlay({ world, native, target, onClose, onDone }) {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [hist, busy]);
 
-  const SYS = `You are an RPG scenario master for language learning.
-Native language of player: ${native.label}
-Language being learned: ${target.label}
+  const SYS = `You are an RPG scenario master for immersive language learning.
+
 World/Setting: ${world.name} — ${world.topic}
+Player speaks: ${native.label}
+Learning: ${target.label}
 
-RULES:
-- NPC dialogue must be in ${target.label}
-- Immediately after ${target.label} dialogue, put translation in ${native.label} in [square brackets]
-- The "situation" and all 3 "choices" must be written in ${native.label} (NOT ${target.label})
-- After 4-5 exchanges set "completed": true
+CRITICAL RULES:
+1. NPC dialogue MUST be in ${target.label} only
+2. Add [${native.label} translation] after dialogue in square brackets
+3. Situation and all choices MUST be in ${native.label} only
+4. After 4-5 exchanges, set completed: true
+5. mood options: happy, neutral, suspicious, friendly
+6. rep: number -10 to 10 (reputation change)
 
-Respond ONLY with valid JSON, no markdown:
-{"npc":"NPC name","dialogue":"${target.label} text [${native.label} translation]","situation":"describe situation in ${native.label}","choices":["choice in ${native.label}","choice2","choice3"],"mood":"happy|neutral|suspicious|friendly","rep":0,"completed":false}`;
+Return ONLY valid JSON object format (no markdown, no extra text):
+{"npc":"NPC name","dialogue":"${target.label} text [${native.label} translation]","situation":"situation in ${native.label}","choices":["choice in ${native.label}","choice 2","choice 3"],"mood":"happy","rep":0,"completed":false}`;
 
   useEffect(() => {
     ask(SYS, "Start the scenario now.")
       .then(text => {
-        const d = parseJSON(text);
-        setHist([{ from:"npc", ...d }]);
-        setOpts(d.choices || []);
-        setPhase("scene");
+        try {
+          const d = parseJSON(text);
+          if (!d.dialogue || !Array.isArray(d.choices) || !d.situation) {
+            throw new Error("Missing required fields in response");
+          }
+          setHist([{ from:"npc", ...d }]);
+          setOpts(d.choices || []);
+          setPhase("scene");
+        } catch (parseErr) {
+          console.error("RPG Parse error:", parseErr.message, "Raw:", text.substring(0, 300));
+          throw parseErr;
+        }
       })
       .catch(e => { setErr(e.message); setPhase("error"); });
-  }, []);
+  }, [native.label, target.label, world.name, world.topic]);
 
   const reply = async (choice) => {
     if (busy) return;
@@ -822,18 +870,40 @@ function BossOverlay({ native, target, onClose, onDone }) {
   const [err,   setErr]      = useState("");
 
   useEffect(() => {
-    const sys = `Generate EXACTLY 10 hard multiple-choice questions.
-Native: ${native.label}. Learning: ${target.label}.
-Mix topics: grammar, vocabulary, idioms, culture.
-Write EVERY question and explanation in ${native.label}.
-Write all 4 options in ${target.label}.
-Return ONLY raw JSON array:
-[{"q":"question in ${native.label}","options":["a in ${target.label}","b","c","d"],"answer":0,"explanation":"in ${native.label}"}]`;
+    const sys = `You are a hard language quiz for boss battles. Generate EXACTLY 10 challenging questions.
 
-    ask(sys, `10 hard questions. Native: ${native.label}. Learning: ${target.label}.`)
-      .then(text => { setQs(parseJSON(text).slice(0,10)); setPhase("battle"); })
+Difficulty: Hard - mix grammar, vocabulary, idioms, culture
+Native language: ${native.label}
+Learning language: ${target.label}
+
+Format requirements:
+1. Question and explanation MUST be in ${native.label}
+2. All 4 options MUST be in ${target.label}
+3. answer: 0-3 (index of correct option)
+4. Make questions challenging but fair
+
+Return ONLY valid JSON array (no other text):
+[
+  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"},
+  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":1,"explanation":"explanation in ${native.label}"}
+]`;
+
+    ask(sys, `Generate 10 hard questions for ${target.label}.`)
+      .then(text => { 
+        try {
+          const data = parseJSON(text);
+          if (!Array.isArray(data) || data.length < 5) {
+            throw new Error("Expected at least 5 questions");
+          }
+          setQs(data.slice(0, 10)); 
+          setPhase("battle"); 
+        } catch (parseErr) {
+          console.error("Boss parse error:", parseErr.message, "Raw:", text.substring(0, 300));
+          throw parseErr;
+        }
+      })
       .catch(e => { setErr(e.message); setPhase("error"); });
-  }, []);
+  }, [native.label, target.label]);
 
   const q = qs[idx];
 
@@ -1122,16 +1192,39 @@ function WordMatch({ target, native, onDone, onBack }) {
   const [err,      setErr]      = useState("");
 
   useEffect(() => {
-    const sys = `Give 6 common ${target?.label} words with ${native?.label} meanings. Return ONLY JSON array:
-[{"t":"${target?.label} word","n":"${native?.label} meaning"}]
-No markdown, no extra text.`;
-    ask(sys, `6 common ${target?.label} words`)
-      .then(text => setPairs(parseJSON(text).slice(0,6)))
+    const sys = `Generate 6 basic ${target?.label} words with ${native?.label} meanings for vocabulary matching game.
+
+Requirements:
+1. Each word is common and useful for beginners
+2. Provide exactly one ${native?.label} translation per word
+3. Keep translations short (1-3 words)
+4. Use simple, clear language
+
+Return ONLY valid JSON array (no other text):
+[
+  {"t":"${target?.label} word","n":"${native?.label} meaning"},
+  {"t":"${target?.label} word","n":"${native?.label} meaning"}
+]`;
+    ask(sys, `Generate 6 basic words in ${target?.label}`)
+      .then(text => {
+        try {
+          const data = parseJSON(text);
+          if (!Array.isArray(data) || data.length === 0) throw new Error("Invalid response");
+          setPairs(data.slice(0, 6));
+        } catch (parseErr) {
+          console.error("WordMatch parse error:", parseErr.message);
+          // Use fallback if parsing fails
+          setPairs([
+            {t:"Hello",n:"Hi"},{t:"Thank you",n:"Thanks"},{t:"Goodbye",n:"Bye"},
+            {t:"Yes",n:"Yes"},{t:"No",n:"No"},{t:"Water",n:"Water"}
+          ]);
+        }
+      })
       .catch(() => setPairs([
         {t:"Hello",n:"Hi"},{t:"Thank you",n:"Thanks"},{t:"Goodbye",n:"Bye"},
         {t:"Yes",n:"Yes"},{t:"No",n:"No"},{t:"Water",n:"Water"}
       ]));
-  }, []);
+  }, [target?.label, native?.label]);
 
   const cards = pairs ? (() => {
     const all = [
@@ -1192,14 +1285,35 @@ function FillBlank({ target, native, onDone, onBack }) {
 
   useEffect(() => {
     const sys = `Generate 5 fill-in-the-blank sentences for learning ${target?.label}.
-Each sentence uses a basic ${target?.label} phrase with one word blanked as ___.
-Return ONLY JSON array, no markdown:
-[{"sentence":"___ wa hon desu","answer":"Kore","hint":"hint in ${native?.label}"}]
-Sentence in ${target?.label}. Hint in ${native?.label}. Answer is the exact missing word.`;
-    ask(sys, `5 fill-blank for ${target?.label}`)
-      .then(text => setQs(parseJSON(text).slice(0,5)))
+
+Requirements:
+1. Each sentence is a complete phrase in ${target?.label}
+2. One word is replaced with ___
+3. Provide the answer: the exact ${target?.label} word that fills the blank
+4. Provide a hint in ${native?.label}
+5. Keep sentences simple and practical
+
+Return ONLY valid JSON array (no other text):
+[
+  {"sentence":"The ___ is red in ${target?.label}","answer":"apple","hint":"hint in ${native?.label}"},
+  {"sentence":"I ___ to school in ${target?.label}","answer":"go","hint":"hint in ${native?.label}"}
+]`;
+    ask(sys, `Generate 5 fill-in-the-blank exercises for ${target?.label}`)
+      .then(text => {
+        try {
+          const data = parseJSON(text);
+          if (!Array.isArray(data) || data.length === 0) {
+            throw new Error("Response is not a valid array");
+          }
+          setQs(data.slice(0, 5));
+        } catch (parseErr) {
+          console.error("FillBlank parse error:", parseErr.message, "Raw:", text.substring(0, 300));
+          setErr(parseErr.message);
+          setQs([]);
+        }
+      })
       .catch(e => { setErr(e.message); setQs([]); });
-  }, []);
+  }, [target?.label, native?.label]);
 
   const q = qs?.[idx];
   const isLast = idx >= (qs?.length||1)-1;
@@ -1253,12 +1367,32 @@ function Typing({ target, native, onDone, onBack }) {
   const tiRef = useRef(null);
 
   useEffect(() => {
-    const sys = `Give 12 common ${target?.label} words with ${native?.label} meanings. Return ONLY JSON:
-[{"word":"${target?.label} word","meaning":"${native?.label} meaning"}]`;
-    ask(sys, `12 words ${target?.label}`)
-      .then(text => setWords(parseJSON(text).slice(0,12)))
-      .catch(() => setWords([{word:"こんにちは",meaning:"Hello"},{word:"ありがとう",meaning:"Thank you"},{word:"さようなら",meaning:"Goodbye"}]));
-  }, []);
+    const sys = `Generate 12 common ${target?.label} words with ${native?.label} translations for a typing race game.
+
+Requirements:
+1. Words are beginner-friendly and practical
+2. Each word is 2-10 characters long
+3. Provide exact ${native?.label} translation
+4. Variations: nouns, verbs, adjectives
+
+Return ONLY valid JSON array (no other text):
+[
+  {"word":"${target?.label} word","meaning":"${native?.label} meaning"},
+  {"word":"${target?.label} word","meaning":"${native?.label} meaning"}
+]`;
+    ask(sys, `Generate 12 words for typing game in ${target?.label}`)
+      .then(text => {
+        try {
+          const data = parseJSON(text);
+          if (!Array.isArray(data) || data.length === 0) throw new Error("Invalid response");
+          setWords(data.slice(0, 12));
+        } catch (parseErr) {
+          console.error("Typing game parse error:", parseErr.message);
+          setWords([{word:"Hello",meaning:"Hi"},{word:"Thanks",meaning:"Thank you"},{word:"Goodbye",meaning:"Bye"}]);
+        }
+      })
+      .catch(() => setWords([{word:"Hello",meaning:"Hi"},{word:"Thanks",meaning:"Thank you"},{word:"Goodbye",meaning:"Bye"}]));
+  }, [target?.label, native?.label]);
 
   useEffect(() => {
     if (!started) return;
