@@ -1,13 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // =============================================================================
-// CONFIG — paste your free Gemini key in .env as VITE_GEMINI_API_KEY
-// Get it FREE at https://aistudio.google.com  (no credit card)
+// CONFIG — paste your free GROQ key in .env as VITE_GROQ_API_KEY
+// Get it FREE at https://console.groq.com (no credit card required)
 // =============================================================================
 const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || "";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-// Call Gemini API. system = instruction string, messages = [{role,content}]
+
+// Validate API key on startup
+if (!GROQ_KEY) {
+  console.warn("⚠️ VITE_GROQ_API_KEY is not set. API calls will fail. Please add it to .env file.");
+}
+
+// Call GROQ API. system = instruction string, messages = [{role,content}]
 async function ask(system, userText) {
+  if (!GROQ_KEY) throw new Error("API key not configured. Add VITE_GROQ_API_KEY to .env");
+  
   const body = {
     model: "llama-3.1-8b-instant",
     messages: [
@@ -24,23 +32,32 @@ async function ask(system, userText) {
     max_tokens: 800,
   };
 
-  const res = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${GROQ_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  const d = await res.json();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
-  if (d.error) throw new Error(d.error.message);
+    const d = await res.json();
 
-  return d.choices?.[0]?.message?.content?.trim() || "";
+    if (d.error) throw new Error(d.error.message);
+    if (!d.choices || !d.choices[0] || !d.choices[0].message) throw new Error("Invalid API response format");
+
+    return d.choices[0].message.content.trim() || "";
+  } catch (e) {
+    throw new Error(`API Error: ${e.message}`);
+  }
 }
-// Multi-turn chat with Gemini
+// Multi-turn chat with GROQ
 async function chat(system, history) {
+  if (!GROQ_KEY) throw new Error("API key not configured. Add VITE_GROQ_API_KEY to .env");
+  
   const body = {
     model: "llama-3.1-8b-instant",
     messages: [
@@ -57,25 +74,46 @@ async function chat(system, history) {
     max_tokens: 600,
   };
 
-  const res = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${GROQ_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  const d = await res.json();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
-  if (d.error) throw new Error(d.error.message);
+    const d = await res.json();
 
-  return d.choices?.[0]?.message?.content?.trim() || "";
+    if (d.error) throw new Error(d.error.message);
+    if (!d.choices || !d.choices[0] || !d.choices[0].message) throw new Error("Invalid API response format");
+
+    return d.choices[0].message.content.trim() || "";
+  } catch (e) {
+    throw new Error(`API Error: ${e.message}`);
+  }
 }
 
-// Parse JSON from AI response (strips markdown fences)
+// Parse JSON from AI response (strips markdown fences and extracts JSON)
 function parseJSON(text) {
-  const clean = text.replace(/```json|```/g, "").trim();
+  if (!text || typeof text !== "string") throw new Error("Invalid input for JSON parsing");
+  
+  // Remove markdown code fences
+  let clean = text.replace(/```json\s*\n?|```\s*\n?/g, "").trim();
+  
+  // Try to find JSON array or object in the text
+  // Look for arrays first: [{ ... }]
+  const arrayMatch = clean.match(/\[\s*{[\s\S]*}\s*\]/m);
+  if (arrayMatch?.[0]) return JSON.parse(arrayMatch[0]);
+  
+  // Look for objects: { ... }
+  const objectMatch = clean.match(/\{[\s\S]*\}/m);
+  if (objectMatch?.[0]) return JSON.parse(objectMatch[0]);
+  
+  // Try parsing the whole thing as last resort
   return JSON.parse(clean);
 }
 
