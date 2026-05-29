@@ -104,6 +104,9 @@ function parseJSON(text) {
   // Remove markdown code fences
   let clean = text.replace(/```json\s*\n?|```\s*\n?/g, "").trim();
   
+  // Remove any "Here's the JSON:" type prefixes and trailing text
+  clean = clean.replace(/^[^[\{]*/, "").trim();
+  
   // Strategy 1: Try direct parse first (cleanest case)
   try {
     return JSON.parse(clean);
@@ -111,24 +114,70 @@ function parseJSON(text) {
     // Continue to extraction strategies
   }
   
-  // Strategy 2: Find and extract JSON array or object
-  // Look for patterns like: ...prefix...[{...}]...suffix... or ...prefix...{...}...suffix...
-  
-  // Find first '[' or '{'
-  const arrayStart = clean.indexOf('[');
-  const objStart = clean.indexOf('{');
-  
+  // Strategy 2: Find first valid JSON structure by counting braces/brackets properly
   let startPos = -1;
-  if (arrayStart !== -1 && objStart !== -1) {
-    startPos = Math.min(arrayStart, objStart);
-  } else if (arrayStart !== -1) {
-    startPos = arrayStart;
-  } else if (objStart !== -1) {
-    startPos = objStart;
+  let isArray = false;
+  
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] === '[') {
+      startPos = i;
+      isArray = true;
+      break;
+    } else if (clean[i] === '{') {
+      startPos = i;
+      isArray = false;
+      break;
+    }
   }
   
-  if (startPos === -1) throw new Error("No JSON structure found in response");\n  \n  // Extract from start position, trying to find valid JSON
-  let bracketCount = 0;\n  let isArray = clean[startPos] === '[';\n  let inString = false;\n  let escapeNext = false;\n  let endPos = -1;\n  \n  for (let i = startPos; i < clean.length; i++) {\n    const char = clean[i];\n    \n    if (escapeNext) {\n      escapeNext = false;\n      continue;\n    }\n    \n    if (char === '\\\\') {\n      escapeNext = true;\n      continue;\n    }\n    \n    if (char === '\"') {\n      inString = !inString;\n      continue;\n    }\n    \n    if (!inString) {\n      if (char === (isArray ? '[' : '{')) bracketCount++;\n      if (char === (isArray ? ']' : '}')) {\n        bracketCount--;\n        if (bracketCount === 0) {\n          endPos = i + 1;\n          break;\n        }\n      }\n    }\n  }\n  \n  if (endPos === -1) throw new Error(\"Mismatched JSON brackets\");\n  \n  const extracted = clean.substring(startPos, endPos);\n  return JSON.parse(extracted);\n}
+  if (startPos === -1) throw new Error("No JSON structure found in response");
+  
+  // Count matching brackets
+  let bracketCount = 0;
+  let inString = false;
+  let escapeNext = false;
+  let endPos = -1;
+  
+  for (let i = startPos; i < clean.length; i++) {
+    const char = clean[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === (isArray ? '[' : '{')) {
+        bracketCount++;
+      } else if (char === (isArray ? ']' : '}')) {
+        bracketCount--;
+        if (bracketCount === 0) {
+          endPos = i + 1;
+          break;
+        }
+      }
+    }
+  }
+  
+  if (endPos === -1) throw new Error("Mismatched JSON brackets in response");
+  
+  const extracted = clean.substring(startPos, endPos);
+  try {
+    return JSON.parse(extracted);
+  } catch (parseErr) {
+    throw new Error(`JSON parse failed at position ${parseErr.message}`);
+  }
+}
 
 // =============================================================================
 // DATA
@@ -570,28 +619,22 @@ function LessonOverlay({ world, native, target, onClose, onDone }) {
   const [err,   setErr]       = useState("");
 
   useEffect(() => {
-    const sys = `You are a language quiz generator. Generate EXACTLY 5 multiple-choice questions in strict JSON format.
-
-CRITICAL: Return ONLY valid JSON array, nothing else. No markdown, no code blocks, no explanations before or after.
-
-Student details:
-- Native language: ${native.label}
-- Learning: ${target.label}
+    const sys = `Generate 5 multiple-choice questions. CRITICAL RULES:
+- Return ONLY a JSON array
+- NO other text before or after JSON
+- NO markdown code blocks
+- Each question object must have: q, options (array of 4), answer (0-3), explanation
+- NEVER use unescaped quotes in strings
+- NEVER add commas after the last array element
+- Question in ${native.label}
+- Options in ${target.label} (all 4 options)
+- Explanation in ${native.label}
 - Topic: ${world.topic}
 
-Format requirements:
-1. Question and explanation MUST be in ${native.label}
-2. All 4 options MUST be in ${target.label}
-3. answer is 0-3 (index of correct option)
-4. Each option should be 1-5 words
+Output format EXACTLY:
+[{"q":"Q1","options":["A","B","C","D"],"answer":0,"explanation":"E1"},{"q":"Q2","options":["A","B","C","D"],"answer":1,"explanation":"E2"}]`;
 
-Return ONLY this JSON array format (no other text):
-[
-  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"},
-  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"}
-]`;
-
-    ask(sys, `Generate 5 questions for learning ${target.label}.`)
+    ask(sys, `Generate 5 questions. Languages: ${native.label} and ${target.label}.`)
       .then(text => {
         try {
           const data = parseJSON(text);
@@ -599,14 +642,17 @@ Return ONLY this JSON array format (no other text):
             throw new Error("Response is not a valid array");
           }
           // Validate each question has required fields
-          const valid = data.every(q => q.q && Array.isArray(q.options) && q.options.length === 4 && typeof q.answer === "number" && q.explanation);
-          if (!valid) {
-            throw new Error("Question format is invalid - missing required fields");
+          for (let i = 0; i < data.length; i++) {
+            const q = data[i];
+            if (!q.q || !Array.isArray(q.options) || q.options.length !== 4 || typeof q.answer !== "number" || !q.explanation) {
+              throw new Error(`Question ${i} is invalid: missing required fields`);
+            }
           }
           setQs(data.slice(0, 5));
           setPhase("quiz");
         } catch (parseErr) {
-          console.error("Parse error:", parseErr.message, "Raw text:", text.substring(0, 200));
+          console.error("Lesson parse error:", parseErr.message);
+          console.error("Raw response first 500 chars:", text.substring(0, 500));
           throw parseErr;
         }
       })
@@ -870,35 +916,39 @@ function BossOverlay({ native, target, onClose, onDone }) {
   const [err,   setErr]      = useState("");
 
   useEffect(() => {
-    const sys = `You are a hard language quiz for boss battles. Generate EXACTLY 10 challenging questions.
+    const sys = `Generate 10 hard language quiz questions. CRITICAL RULES:
+- Return ONLY a JSON array
+- NO other text before or after JSON
+- NO markdown code blocks
+- Each question object must have: q, options (array of 4), answer (0-3), explanation
+- NEVER use unescaped quotes in strings
+- NEVER add commas after the last array element
+- Question in ${native.label}
+- Options in ${target.label} (all 4 options)
+- Explanation in ${native.label}
 
-Difficulty: Hard - mix grammar, vocabulary, idioms, culture
-Native language: ${native.label}
-Learning language: ${target.label}
+Output format EXACTLY:
+[{"q":"Q1","options":["A","B","C","D"],"answer":0,"explanation":"E1"},{"q":"Q2","options":["A","B","C","D"],"answer":1,"explanation":"E2"}]`;
 
-Format requirements:
-1. Question and explanation MUST be in ${native.label}
-2. All 4 options MUST be in ${target.label}
-3. answer: 0-3 (index of correct option)
-4. Make questions challenging but fair
-
-Return ONLY valid JSON array (no other text):
-[
-  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":0,"explanation":"explanation in ${native.label}"},
-  {"q":"question in ${native.label}","options":["option in ${target.label}","option","option","option"],"answer":1,"explanation":"explanation in ${native.label}"}
-]`;
-
-    ask(sys, `Generate 10 hard questions for ${target.label}.`)
+    ask(sys, `10 hard questions. Languages: ${native.label} and ${target.label}.`)
       .then(text => { 
         try {
           const data = parseJSON(text);
           if (!Array.isArray(data) || data.length < 5) {
-            throw new Error("Expected at least 5 questions");
+            throw new Error("Expected at least 5 questions, got " + data.length);
+          }
+          // Validate structure
+          for (let i = 0; i < data.length; i++) {
+            const q = data[i];
+            if (!q.q || !Array.isArray(q.options) || q.options.length !== 4 || typeof q.answer !== "number" || !q.explanation) {
+              throw new Error(`Question ${i} has invalid structure`);
+            }
           }
           setQs(data.slice(0, 10)); 
           setPhase("battle"); 
         } catch (parseErr) {
-          console.error("Boss parse error:", parseErr.message, "Raw:", text.substring(0, 300));
+          console.error("Boss parse error:", parseErr.message);
+          console.error("Raw response first 500 chars:", text.substring(0, 500));
           throw parseErr;
         }
       })
