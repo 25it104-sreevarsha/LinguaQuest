@@ -4,6 +4,7 @@
 > Powered by **Google Gemini API (FREE — no credit card)**
 
 ---
+##Live Demo :    https://lingua-quest-ebon.vercel.app/
 
 ## 🆓 Step 1 — Get your FREE API key (2 minutes)
 
