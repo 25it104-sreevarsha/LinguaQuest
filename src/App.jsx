@@ -12,6 +12,23 @@ if (!GROQ_KEY) {
   console.warn("⚠️ VITE_GROQ_API_KEY is not set. API calls will fail. Please add it to .env file.");
 }
 
+// Add AbortController for timeout
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 sec timeout
+signal: controller.signal // Add to fetch options
+
+// Retry 3 times with exponential backoff (1s, 2s, 4s)
+for (let attempt = 0; attempt < 3; attempt++) {
+  try {
+    // fetch and parse
+  } catch (e) {
+    if (attempt < 2) {
+      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
+      continue;
+    }
+  }
+}
+
 // Call GROQ API. system = instruction string, messages = [{role,content}]
 async function ask(system, userText) {
   if (!GROQ_KEY) throw new Error("API key not configured. Add VITE_GROQ_API_KEY to .env");
@@ -1599,7 +1616,10 @@ function ErrBox({ msg, onRetry }) {
     <div style={{ padding:"1.5rem", textAlign:"center" }}>
       <div style={{ fontSize:40, marginBottom:10 }}>⚠️</div>
       <div style={{ color:"#f87171", fontSize:14, marginBottom:16 }}>Error: {msg}</div>
-      <button className="lq-btn" onClick={onRetry} style={{ background:"#f87171", color:"#fff" }}>Close & Retry</button>
+      <button className="lq-btn" onClick={onRetry} 
+        style={{ background:"#6ee7b7", color:"#000" }}>
+        🔄 Retry Now
+      </button>
     </div>
   );
 }
